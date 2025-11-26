@@ -42,13 +42,14 @@ lib: CSMIS-DSP
 
 Src: source files
 
-​	fft_analysis.cpp: FFT achievements
+- fft_analysis.cpp: FFT achievements
 
-​	filter.cpp: Moving average and other filter
+- filter.cpp: Moving average and other filter
 
-​	imu_drier.cpp: Setup IMU and read accelerometer and gyroscope
+- imu_drier.cpp: Setup IMU and read accelerometer and gyroscope
 
-​	main.cpp: Main function
+- main.cpp: Main function
+
 
 
 
