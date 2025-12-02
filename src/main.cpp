@@ -6,6 +6,8 @@
 #include "filter.h"
 #include "fft_analysis.h"
 #include <arm_math.h>
+// ==== 新增：BLE 接口封装 ====（lyt修改）
+#include "ble_service.h" 
 
 I2C_HandleTypeDef hi2c2;   // I2C2
 UART_HandleTypeDef huart1;
@@ -25,6 +27,12 @@ static int sample_idx = 0;
 static int stationary_windows = 0; // count of consecutive no-step windows
 static bool had_steps = false; // record if there were steps in previous window
 
+// ==== 新增：三个症状 flag + 总体 state ====(BLE part)（lyt修改）
+static int tremor_flag     = 0;   // 0/1: 是否检测到 tremor
+static int dyskinesia_flag = 0;   // 0/1: 是否检测到 dyskinesia
+static int fog_flag        = 0;   // 0/1: 是否检测到 FOG
+static int state           = 0;   // 0/1/2/3：整体状态编码
+
 int main(void)
 {
     HAL_Init();
@@ -35,6 +43,14 @@ int main(void)
     //MX_USART1_UART_Init();
 
     imu_init(); 
+
+    // BLE Part
+    // ==== BLE 初始化 ====
+    // NOTE[TEAM-BLE]:
+    //   这里调用我们封装好的 BLE 初始化函数：
+    //   - 在 ble_service.cpp 中会完成 BLE.init()、添加 Service、开始广播
+    //   - 手机上会看到一个名为 "PD-State" 的 BLE 设备
+    ble_init();
 
     /*
 
@@ -72,7 +88,14 @@ int main(void)
         // Read accelerometer and gyroscope
         AccelData accel = imu_read_accel();
         GyroData  gyro  = imu_read_gyro();
-
+        /*
+        char buf[100];
+        int len = snprintf(buf, sizeof(buf),
+                           "AX=%.3f g, AY=%.3f g, AZ=%.3f g\r\n",
+                           accel.ax, accel.ay, accel.az);
+        printf("%s", buf);
+        */
+       
         // Apply simple low-pass filter
         accel = filter_accel_lowpass(accel);
 
@@ -98,6 +121,11 @@ int main(void)
         {
             printf("=== Window analysis start ===\r\n");
 
+            // 每个窗口开始前，先清零本窗口的检测结果(BLE Part)（lyt修改）
+            tremor_flag     = 0;
+            dyskinesia_flag = 0;
+            // fog_flag 在 FOG 检测部分再决定是否置 1
+
 
             // --- Step 1: Stationary check ---
             bool stationary = is_stationary(accel_buf, WINDOW_SAMPLES);
@@ -111,10 +139,18 @@ int main(void)
                     float total_energy = fft_get_band_energy(0.5f, 10.0f);
 
                     if (total_energy > 0.0f) {
+                        // NOTE[TEAM-ALG]:
+                        //   下面这些 0.1f / 0.2f 就是阈值，后续队友可以根据实验结果调整：
+                        //   - trem_energy / total_energy > TH_TREMOR  => Tremor
+                        //   - dysk_energy / total_energy > TH_DYSK    => Dyskinesia
+                        //   - step_energy / total_energy > TH_STEP    => 有步态（在走路）
+
                         if (trem_energy / total_energy > 0.1f) {
+                            tremor_flag = 1;  // ★ 标记本窗口检测到 tremor（lyt修改）
                             printf("Tremor detected (3-5Hz)\r\n");
                         }
                         if (dysk_energy / total_energy > 0.1f) {
+                            dyskinesia_flag = 1;  // ★ 标记本窗口检测到 dyskinesia(lyt修改)
                             printf("Dyskinesia detected (5-7Hz)\r\n");
                         }
                         if (step_energy / total_energy > 0.2f) {
@@ -127,13 +163,16 @@ int main(void)
                 printf("Stationary: skip tremor/dyskinesia detection\r\n");
             }
 
-            // --- Step 3: FOG detection ---
+            // --- Step 3: FOG detection ---（BLE Part）（lyt添加）
             // FOG detection logic: if there were steps in previous windows,
+            // 默认本窗口没有 FOG，后面如满足条件再置 1
+            fog_flag = 0;
             if (had_steps) {
                 if (stationary) {
                     stationary_windows++;
                     if (stationary_windows >= 2) { // stationary for 2 consecutive windows
                         printf("FOG detected (Freezing of Gait)\r\n");
+                        fog_flag = 1;        // ★ 标记 FOG 被检测到
                         had_steps = false;          
                         stationary_windows = 0;
                     }
@@ -141,10 +180,49 @@ int main(void)
                     stationary_windows = 0; 
                 }
             }
+
+            // BLE Part (lyt 添加)
+            // --- Step 4: 将检测结果映射为 0/1/2/3，用于 BLE 发送 ---
+            //
+            // state 编码（与 ble_service.h 中保持一致）：
+            //   0 = Normal
+            //   1 = Tremor
+            //   2 = Dyskinesia
+            //   3 = FOG
+            //
+            // NOTE[TEAM-ALG]:
+            //   这里也可以根据你们想要的优先级调整：
+            //   例如 FOG > Tremor > Dyskinesia，或者其他顺序。
+            // 这里你可以根据需要调整优先级（FOG > Tremor > Dyskinesia）
+            if (fog_flag) {
+                state = 3;
+            } else if (tremor_flag) {
+                state = 1;
+            } else if (dyskinesia_flag) {
+                state = 2;
+            } else {
+                state = 0; // Normal / no abnormal pattern
+            }
+
+            // BLE Part（lyt 添加）
+            // --- Step 5: 通过 BLE 广播当前状态 ---
+            // NOTE[TEAM-BLE]:
+            //   ble_update(state) 会把值写入 GATT characteristic，
+            //   手机端订阅后即可收到 0/1/2/3 的变化。
+            // --- Step 5: 通过 BLE 广播当前状态 + 3 个 flag ---
+            ble_update(state, tremor_flag, dyskinesia_flag, fog_flag);
+
             // Reset sampling
             sample_idx = 0;
         }
 
+        // BLE Part
+        // ==== BLE 事件轮询 ====
+        // NOTE[TEAM-BLE]:
+        //   需要在主循环里周期性调用，用于处理连接/断开等事件。
+        ble_process();
+
+        // 控制采样频率
         HAL_Delay(1000 / SAMPLE_RATE); // Control sampling frequency
     }
 }
