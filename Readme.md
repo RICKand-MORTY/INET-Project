@@ -26,11 +26,9 @@ Raj, Shivangi
 
 - [x] Detect FOG
 
-- [ ] Robustness of detection
+- [x] Robustness of detection
 
-- [ ] Bluetooth
-
-  ...
+- [x] Bluetooth
 
   
 
@@ -49,6 +47,8 @@ Src: source files
 - imu_drier.cpp: Setup IMU and read accelerometer and gyroscope
 
 - main.cpp: Main function
+
+- ble_service.cpp: Bluetooth
 
 
 
